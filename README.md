@@ -16,11 +16,11 @@ Build a multi-agent AI system that evaluates a borrower's default risk.
 - Agent 3: Logistic Regression — makes final decision
 
 ## Progress
-- [x] Phase 1: Setup
-- [ ] Phase 2: Explore data
-- [ ] Phase 3: Clean data
+- [X] Phase 1: Setup
+- [X] Phase 2: Explore data
+- [X] Phase 3: Clean data
 - [ ] Phase 4: Agent 2 (Random Forest)
 - [ ] Phase 5: Agent 3 (Logistic Regression)
-- [ ] Phase 6: Agent 1 (RNN)
+- [X] Phase 6: Agent 1 (RNN)
 - [ ] Phase 7: Coordinator
 - [ ] Phase 8: Demo + Report
