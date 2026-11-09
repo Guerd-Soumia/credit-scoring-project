@@ -1,0 +1,8 @@
+{
+    "accuracy": 0.9995259997893332,
+    "precision_positive_class": 0.9382716049382716,
+    "recall_positive_class": 0.7755102040816326,
+    "f1_positive_class": 0.8491620111731844,
+    "roc_auc": 0.9659116847357966,
+    "average_precision": 0.8689417150065081
+}

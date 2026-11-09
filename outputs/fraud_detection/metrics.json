@@ -1,0 +1,46 @@
+{
+  "agent_name": "Agent 2 - Random Forest",
+  "dataset_type": "credit_card_fraud",
+  "dataset_file": "cc_data.pkl",
+  "target_column": "Class",
+  "model_name": "fraud_random_forest",
+  "n_estimators": 300,
+  "random_state": 42,
+  "n_jobs": -1,
+  "class_weight": "balanced_subsample",
+  "training_rows": 227845,
+  "test_rows": 56962,
+  "accuracy": 0.9995084442259752,
+  "precision_class_1": 0.9605263157894737,
+  "recall_class_1": 0.7448979591836735,
+  "f1_class_1": 0.8390804597701149,
+  "roc_auc": 0.9615459154961928,
+  "average_precision": 0.8645375351234454,
+  "classification_report": {
+    "0": {
+      "precision": 0.9995605245578877,
+      "recall": 0.9999472425436128,
+      "f1-score": 0.9997538461538461,
+      "support": 56864.0
+    },
+    "1": {
+      "precision": 0.9605263157894737,
+      "recall": 0.7448979591836735,
+      "f1-score": 0.8390804597701149,
+      "support": 98.0
+    },
+    "accuracy": 0.9995084442259752,
+    "macro avg": {
+      "precision": 0.9800434201736807,
+      "recall": 0.8724226008636431,
+      "f1-score": 0.9194171529619806,
+      "support": 56962.0
+    },
+    "weighted avg": {
+      "precision": 0.9994933683404215,
+      "recall": 0.9995084442259752,
+      "f1-score": 0.9994774163960145,
+      "support": 56962.0
+    }
+  }
+}
