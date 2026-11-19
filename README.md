@@ -19,8 +19,8 @@ Build a multi-agent AI system that evaluates a borrower's default risk.
 - [X] Phase 1: Setup
 - [X] Phase 2: Explore data
 - [X] Phase 3: Clean data
-- [ ] Phase 4: Agent 2 (Random Forest)
-- [ ] Phase 5: Agent 3 (Logistic Regression)
+- [X] Phase 4: Agent 2 (Random Forest)
+- [X] Phase 5: Agent 3 (Logistic Regression)
 - [X] Phase 6: Agent 1 (RNN)
-- [ ] Phase 7: Coordinator
-- [ ] Phase 8: Demo + Report
+- [X] Phase 7: Coordinator
+- [X] Phase 8: Demo + Report
