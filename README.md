@@ -2,7 +2,7 @@
 
 **Project 13 — Octroi Décentralisé de Crédit & Analyse de Solvabilité**
 
-An AI-powered multi-agent system that evaluates creditworthiness by combining transaction fraud detection, borrower risk assessment, and a final decision-making model.
+An AI-powered multi-agent system that evaluates creditworthiness by combining transaction fraud detection, borrower risk assessment, and a final rule-based decision model with LLM justification.
 
 ## Team
 
@@ -14,40 +14,38 @@ An AI-powered multi-agent system that evaluates creditworthiness by combining tr
 
 The objective of this project is to develop a multi-agent AI system capable of analyzing financial transactions and borrower profiles to estimate the risk of loan default.
 
-The system combines three machine learning agents coordinated through a unified decision pipeline.
+The system combines three agents coordinated through a unified decision pipeline.
 
 ## System Architecture
 
 ### Agent 1 — Transaction Fraud Detection (RNN / LSTM)
-
 - Analyzes credit card transaction features.
 - Uses a Recurrent Neural Network (LSTM).
 - Detects potentially fraudulent transactions.
 - Produces a fraud probability score.
 
 ### Agent 2 — Loan Default Prediction (Random Forest)
-
 - Analyzes borrower financial and demographic information.
 - Uses a Random Forest classifier.
 - Estimates the probability of loan default.
-- Applies a 25% risk threshold for its risk classification.
+- Applies a 50% risk threshold for its risk classification.
 
-### Agent 3 — Final Decision (Logistic Regression)
-
-- Combines the outputs of Agent 1 and Agent 2.
-- Uses Logistic Regression to produce a final decision.
-- Determines whether a loan application should be approved or rejected.
+### Agent 3 — Final Decision (Rules + Local LLM)
+- Reads the scores from Agent 1 and Agent 2.
+- Applies deterministic rules: if fraud > 50%, reject; if default > 50%, reject; otherwise approve.
+- Uses a local LLM (Llama 3.2 1B via Ollama) to generate a natural-language justification sentence.
+- If the LLM is offline, falls back to a safe template.
 
 ## User Interface
 
 The project includes an interactive web application developed with **Streamlit**.
 
-The interface provides two main sections:
+The interface provides three main sections:
 
 **1. Transaction Fraud Analysis**
 - Load real normal transactions.
 - Load real fraudulent transactions.
-- Generate random fraudulent transactions.
+- Generate random transactions.
 - Edit the 30 input features.
 - Run the LSTM fraud prediction.
 
@@ -56,119 +54,25 @@ The interface provides two main sections:
 - Load a risky applicant profile.
 - Generate a random applicant profile.
 - Edit the 79 borrower features.
-- Run the Random Forest and Logistic Regression pipeline.
-- Display the individual risk scores and final loan decision.
+- Run the Random Forest prediction.
+
+**3. Final Decision (Agent 3)**
+- Combines the results of Tabs 1 and 2.
+- Applies the strict decision rules.
+- Generates the final approval/rejection and justification.
 
 ## Technologies Used
-
 - Python
 - TensorFlow / Keras
 - Scikit-learn
-- Pandas
-- NumPy
+- Pandas / NumPy
 - Streamlit
-- Matplotlib / Seaborn
+- Ollama (Local LLM)
 - Jupyter Notebook
-
-## Project Progress
-
-- [x] Phase 1: Environment and project setup
-- [x] Phase 2: Data exploration
-- [x] Phase 3: Data cleaning and preprocessing
-- [x] Phase 4: Agent 2 — Random Forest
-- [x] Phase 5: Agent 3 — Logistic Regression
-- [x] Phase 6: Agent 1 — RNN / LSTM
-- [x] Phase 7: Multi-agent coordination
-- [x] Phase 8: Demonstration and report
-- [x] Streamlit interface development
-- [x] Integration of the three agents
-- [x] Testing and interface improvements
 
 ## Installation and Execution
 
 ### 1. Clone the repository
-
 ```bash
 git clone https://github.com/Guerd-Soumia/credit-scoring-project.git
 cd credit-scoring-project
-```
-
-### 2. Create a virtual environment
-
-```bash
-python -m venv .venv
-```
-
-Activate it on Windows:
-
-```powershell
-.venv\Scripts\activate
-```
-
-### 3. Install dependencies
-
-```bash
-pip install -r requirements.txt
-```
-
-### 4. Prepare the required files
-
-The trained models and datasets are excluded from Git through `.gitignore`.
-
-Before launching the application, make sure the following files are available locally:
-
-**Models**
-- `models/agent1_rnn.h5`
-- `models/agent2_rf.pkl`
-- `models/agent3_lr.pkl`
-- `models/hc_scaler.pkl`
-- `models/hc_feature_names.pkl`
-
-**Data**
-- `data/clean/cc_data.pkl`
-
-Generate or obtain these files using the project's preprocessing and training notebooks.
-
-### 5. Launch the application
-
-```bash
-streamlit run app.py
-```
-
-The application will open in your browser.
-
-## Repository Structure
-
-```text
-credit-scoring-project/
-│
-├── .streamlit/
-│   └── config.toml
-│
-├── data/
-│   └── clean/
-│
-├── models/
-│
-├── notebooks/
-│   ├── 02_clean.ipynb
-│   ├── 04_agent2_rf.ipynb
-│   └── 05_agent3_lr.ipynb
-│
-├── app.py
-├── test_agent2.py
-├── requirements.txt
-├── .gitignore
-└── README.md
-```
-
-## Important Notes
-
-- The application requires the trained model files and preprocessed datasets to be available locally.
-- These files are not included in the Git repository because they are excluded by `.gitignore`.
-- The Random Forest uses a 25% default-risk threshold.
-- The final decision is generated by the Logistic Regression agent.
-
-## Project Objective
-
-This project demonstrates how multiple specialized machine learning agents can collaborate in a unified credit assessment pipeline, combining fraud detection and borrower solvency analysis to support more informed lending decisions.

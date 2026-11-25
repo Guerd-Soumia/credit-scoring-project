@@ -1,1033 +1,623 @@
+"""
+Aura Credit Engine - interface of the Credit Scoring Project
 
-import streamlit as st
-import pandas as pd
-import numpy as np
-import pickle
-import tensorflow as tf
+Agent 1: RNN (LSTM)        -> fraud score from one transaction
+Agent 2: Random Forest     -> default score from one applicant profile
+Agent 3: rules + local LLM -> decision (approved / rejected) + justification
+
+Run from the project folder:   streamlit run app.py
+Expected folders:  data/clean/  and  models/
+"""
+
 import os
+import pickle
 
-# --- 1. PAGE CONFIG ---
-st.set_page_config(
-    page_title="Aura Credit Engine",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
+import numpy as np
+import pandas as pd
+import requests
+import streamlit as st
+import tensorflow as tf
 
-# --- 2. CSS ---
+# --------------------------------------------------------------------------
+# 0. SETTINGS (same values as 06_coordinator.ipynb)
+# --------------------------------------------------------------------------
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+FRAUD_THRESHOLD = 0.5     # Agent 1: precision 0.80, recall 0.83 at this threshold
+RF_THRESHOLD = 0.5        # Agent 2: precision 0.17, recall 0.61 at this threshold
+
+OLLAMA_URL = "http://localhost:11434"
+OLLAMA_MODEL = "llama3.2:1b"
+
+BAD_PHRASES = ["i can't", "i can\u2019t", "i cannot", "i'm sorry", "i am sorry",
+               "can't assist", "as an ai", "loan officer", "here is", "here are"]
+
+
+def path(*parts):
+    return os.path.join(BASE_DIR, *parts)
+
+
+# --------------------------------------------------------------------------
+# 1. PAGE CONFIG + CSS
+# --------------------------------------------------------------------------
+st.set_page_config(page_title="Aura Credit Engine", layout="wide",
+                   initial_sidebar_state="expanded")
+
 st.markdown("""
 <style>
     @import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;800&display=swap');
-
-    html, body, [class*="css"] {
-        font-family: 'Outfit', sans-serif;
-    }
+    html, body, [class*="css"] { font-family: 'Outfit', sans-serif; }
 
     .main-title {
-        font-size: 3.5rem;
-        font-weight: 800;
+        font-size: 3.2rem; font-weight: 800; margin-bottom: 0px;
         background: -webkit-linear-gradient(45deg, #00F0FF, #7000FF);
-        -webkit-background-clip: text;
-        -webkit-text-fill-color: transparent;
-        margin-bottom: 0px;
+        -webkit-background-clip: text; -webkit-text-fill-color: transparent;
     }
-
-    .sub-title {
-        color: #9CA3AF;
-        font-size: 1.1rem;
-        margin-top: 0px;
-        margin-bottom: 30px;
-        font-weight: 300;
-    }
+    .sub-title { color: #9CA3AF; font-size: 1.05rem; margin-top: 0; margin-bottom: 24px; font-weight: 300; }
 
     .glass-card {
-        background: rgba(26, 28, 36, 0.7);
-        border: 1px solid rgba(255, 255, 255, 0.05);
-        border-radius: 16px;
-        padding: 24px;
-        box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.3);
-        margin-bottom: 20px;
+        background: rgba(26, 28, 36, 0.7); border: 1px solid rgba(255,255,255,0.06);
+        border-radius: 16px; padding: 22px 24px; margin: 14px 0;
+        box-shadow: 0 8px 32px rgba(0,0,0,0.3);
     }
+    .decision-ok  { color: #16A34A; font-size: 2.1rem; font-weight: 800; margin: 4px 0; }
+    .decision-bad { color: #FF4B4B; font-size: 2.1rem; font-weight: 800; margin: 4px 0; }
+    .tag { display: inline-block; padding: 2px 10px; border-radius: 999px; font-size: 0.72rem;
+           font-weight: 600; background: rgba(0,240,255,0.12); color: #00F0FF; }
+    .tag-warn { background: rgba(245,158,11,0.15); color: #F59E0B; }
 
-    .stNumberInput label,
-    .stSelectbox label,
-    .stCheckbox label {
-        color: #00F0FF !important;
-        font-size: 0.75rem !important;
-        font-weight: 600 !important;
-    }
+    .stNumberInput label { color: #00F0FF !important; font-size: 0.75rem !important; font-weight: 600 !important; }
 
     .stButton>button {
-        background: linear-gradient(90deg, #00F0FF 0%, #7000FF 100%);
-        color: white;
-        border: none;
-        border-radius: 8px;
-        padding: 12px 24px;
-        font-weight: 600;
-        font-size: 1rem;
-        width: 100%;
+        background: linear-gradient(90deg, #00F0FF 0%, #7000FF 100%); color: white; border: none;
+        border-radius: 8px; padding: 10px 20px; font-weight: 600; width: 100%;
     }
+    .stButton>button:hover { transform: translateY(-2px); box-shadow: 0 4px 15px rgba(0,240,255,0.4); }
 
-    .stButton>button:hover {
-        transform: translateY(-2px);
-        box-shadow: 0 4px 15px rgba(0, 240, 255, 0.4);
-    }
+    .stTabs [data-baseweb="tab"] { background-color: #1A1C24; border-radius: 8px 8px 0 0; padding: 10px 18px; color: #9CA3AF; }
+    .stTabs [aria-selected="true"] { background-color: #0E1117; color: #00F0FF !important; border-top: 3px solid #00F0FF; }
 
-    .st-key-agent1_load_buttons [data-testid="column"]:nth-child(1) .stButton>button {
-        background: #16A34A !important;
-        color: white !important;
-    }
-
-    .st-key-agent1_load_buttons [data-testid="column"]:nth-child(2) .stButton>button {
-        background: #DC2626 !important;
-        color: white !important;
-    }
-
-    .stTabs [data-baseweb="tab"] {
-        background-color: #1A1C24;
-        border-radius: 8px 8px 0px 0px;
-        padding: 10px 20px;
-        color: #9CA3AF;
-    }
-
-    .stTabs [aria-selected="true"] {
-        background-color: #0E1117;
-        color: #00F0FF !important;
-        border-top: 3px solid #00F0FF;
-    }
-
-    #MainMenu {
-        visibility: hidden;
-    }
-
-    footer {
-        visibility: hidden;
-    }
+    #MainMenu { visibility: hidden; }
+    footer { visibility: hidden; }
 </style>
 """, unsafe_allow_html=True)
 
 
-# --- 3. SESSION STATE ---
-if 'rnn_fraud_proba' not in st.session_state:
-    st.session_state['rnn_fraud_proba'] = 0.0
-
-if 'tx_label' not in st.session_state:
-    st.session_state['tx_label'] = None
-
-if 'rnn_initialized' not in st.session_state:
-    st.session_state['rnn_initialized'] = False
-
-if 'rf_initialized' not in st.session_state:
-    st.session_state['rf_initialized'] = False
-
-if 'rf_label' not in st.session_state:
-    st.session_state['rf_label'] = None
-
-
-# --- 4. LOAD MODELS & DATA ---
+# --------------------------------------------------------------------------
+# 2. LOADING (models, feature names, test data)
+# --------------------------------------------------------------------------
 @st.cache_resource
 def load_models():
     m = {}
+    if os.path.exists(path("models", "agent1_rnn.h5")):
+        # compile=False: we only predict, so no need to rebuild loss/metrics
+        m["rnn"] = tf.keras.models.load_model(path("models", "agent1_rnn.h5"), compile=False)
+    if os.path.exists(path("models", "agent2_rf.pkl")):
+        with open(path("models", "agent2_rf.pkl"), "rb") as f:
+            m["rf"] = pickle.load(f)
+    if os.path.exists(path("models", "hc_scaler.pkl")):
+        with open(path("models", "hc_scaler.pkl"), "rb") as f:
+            m["scaler"] = pickle.load(f)
 
-    if os.path.exists('models/agent1_rnn.h5'):
-        m['rnn'] = tf.keras.models.load_model(
-            'models/agent1_rnn.h5'
-        )
-
-    if os.path.exists('models/agent2_rf.pkl'):
-        with open('models/agent2_rf.pkl', 'rb') as f:
-            m['rf'] = pickle.load(f)
-
-    if os.path.exists('models/agent3_lr.pkl'):
-        with open('models/agent3_lr.pkl', 'rb') as f:
-            m['lr'] = pickle.load(f)
-
-    if os.path.exists('models/hc_scaler.pkl'):
-        with open('models/hc_scaler.pkl', 'rb') as f:
-            m['scaler'] = pickle.load(f)
-
-    if os.path.exists('models/hc_feature_names.pkl'):
-        with open('models/hc_feature_names.pkl', 'rb') as f:
-            m['feature_names'] = pickle.load(f)
-
+    # Feature names: 02_clean saves them inside hc_data.pkl (5th element).
+    # A separate models/hc_feature_names.pkl is used only if it exists.
+    names = None
+    if os.path.exists(path("models", "hc_feature_names.pkl")):
+        with open(path("models", "hc_feature_names.pkl"), "rb") as f:
+            names = pickle.load(f)
+    elif os.path.exists(path("data", "clean", "hc_data.pkl")):
+        with open(path("data", "clean", "hc_data.pkl"), "rb") as f:
+            names = pickle.load(f)[4]
+    if names is not None:
+        m["feature_names"] = list(names)
     return m
 
 
 @st.cache_resource
-def load_cc_data():
-    with open('data/clean/cc_data.pkl', 'rb') as f:
-        _, X_test, _, y_test = pickle.load(f)
-
-    return X_test, y_test
-
-
-@st.cache_resource
-def load_cc_stats():
-    with open('data/clean/cc_data.pkl', 'rb') as f:
-        X_train, _, y_train, _ = pickle.load(f)
-
-    normal = X_train[y_train == 0].values
-    fraud = X_train[y_train == 1].values
-
-    return {
-        'normal_mean': normal.mean(axis=0),
-        'normal_std': normal.std(axis=0),
-        'fraud_mean': fraud.mean(axis=0),
-        'fraud_std': fraud.std(axis=0),
-        'normal_count': len(normal),
-        'fraud_count': len(fraud)
-    }
+def load_test_data():
+    """Only TEST rows are used in the demo (the models never saw them)."""
+    d = {}
+    try:
+        with open(path("data", "clean", "cc_data.pkl"), "rb") as f:
+            _, X_test, _, y_test = pickle.load(f)
+        d["cc_X"], d["cc_y"] = X_test, y_test
+    except Exception:
+        pass
+    try:
+        with open(path("data", "clean", "hc_data.pkl"), "rb") as f:
+            _, X_test, _, y_test, _ = pickle.load(f)     # X_test is already scaled
+        d["hc_X"], d["hc_y"] = X_test, y_test
+    except Exception:
+        pass
+    return d
 
 
 models = load_models()
-cc_X_test, cc_y_test = load_cc_data()
-cc_stats = load_cc_stats()
+data = load_test_data()
+
+CC_FEATURES = list(data["cc_X"].columns) if "cc_X" in data else \
+    [f"V{i}" for i in range(1, 29)] + ["scaled_amount", "scaled_time"]
+HC_FEATURES = models.get("feature_names", [])
 
 
-# --- 5. CREDIT CARD FEATURE NAMES (AGENT 1) ---
-CC_FEATURE_NAMES = [
-    'V1', 'V2', 'V3', 'V4', 'V5', 'V6', 'V7', 'V8', 'V9', 'V10',
-    'V11', 'V12', 'V13', 'V14', 'V15', 'V16', 'V17', 'V18', 'V19', 'V20',
-    'V21', 'V22', 'V23', 'V24', 'V25', 'V26', 'V27', 'V28',
-    'scaled_amount', 'scaled_time'
-]
+@st.cache_resource
+def example_positions():
+    """Pick clear example rows from the test sets (same idea as 06_coordinator)."""
+    ex = {}
+    if "rnn" in models and "cc_X" in data:
+        y = data["cc_y"].values
+        X = data["cc_X"].values
+        ex["cc_normal"] = int(np.where(y == 0)[0][0])
+        fraud_pos = np.where(y == 1)[0]
+        probs = models["rnn"].predict(X[fraud_pos].reshape(-1, 1, X.shape[1]), verbose=0).flatten()
+        ex["cc_fraud"] = int(fraud_pos[np.argmax(probs)])        # most obvious fraud
+    if "rf" in models and "hc_X" in data:
+        probs = models["rf"].predict_proba(data["hc_X"])[:, 1]
+        ex["hc_safe"] = int(np.argmin(probs))
+        ex["hc_risky"] = int(np.argmax(probs))
+    return ex
 
 
-# --- 6. HOMECREDIT GROUPS (AGENT 2) ---
-FEATURE_GROUPS = {
-    "Financial": [
-        "AMT_INCOME_TOTAL",
-        "AMT_CREDIT",
-        "AMT_ANNUITY",
-        "AMT_GOODS_PRICE"
-    ],
-
-    "Socio-Professional": [
-        "CNT_CHILDREN",
-        "CNT_FAM_MEMBERS",
-        "NAME_EDUCATION_TYPE",
-        "NAME_FAMILY_STATUS",
-        "NAME_INCOME_TYPE",
-        "OCCUPATION_TYPE",
-        "ORGANIZATION_TYPE",
-        "DAYS_BIRTH",
-        "DAYS_EMPLOYED",
-        "DAYS_REGISTRATION",
-        "DAYS_ID_PUBLISH",
-        "CODE_GENDER",
-        "FLAG_OWN_CAR",
-        "FLAG_OWN_REALTY"
-    ],
-
-    "Housing & Region": [
-        "REGION_POPULATION_RELATIVE",
-        "REGION_RATING_CLIENT",
-        "REGION_RATING_CLIENT_W_CITY",
-        "HOUR_APPR_PROCESS_START",
-        "WEEKDAY_APPR_PROCESS_START"
-    ],
-
-    "Documents": [],
-    "Credit Bureau": []
-}
-
-
-if 'feature_names' in models:
-    known = set()
-
-    for feats in FEATURE_GROUPS.values():
-        known.update(feats)
-
-    for f in models['feature_names']:
+# --------------------------------------------------------------------------
+# 3. FEATURE GROUPS (Agent 2 inputs)
+# --------------------------------------------------------------------------
+def build_feature_groups(feature_names):
+    groups = {
+        "Financial": ["AMT_INCOME_TOTAL", "AMT_CREDIT", "AMT_ANNUITY", "AMT_GOODS_PRICE"],
+        "Socio-Professional": [
+            "CNT_CHILDREN", "CNT_FAM_MEMBERS", "NAME_EDUCATION_TYPE", "NAME_FAMILY_STATUS",
+            "NAME_INCOME_TYPE", "OCCUPATION_TYPE", "ORGANIZATION_TYPE", "DAYS_BIRTH",
+            "DAYS_EMPLOYED", "DAYS_REGISTRATION", "DAYS_ID_PUBLISH", "CODE_GENDER",
+            "FLAG_OWN_CAR", "FLAG_OWN_REALTY"],
+        "Housing & Region": [
+            "REGION_POPULATION_RELATIVE", "REGION_RATING_CLIENT", "REGION_RATING_CLIENT_W_CITY",
+            "HOUR_APPR_PROCESS_START", "WEEKDAY_APPR_PROCESS_START"],
+        "Documents": [],
+        "Credit Bureau": [],
+        "Other": [],
+    }
+    names = set(feature_names)
+    for g in groups:                       # keep only features that really exist
+        groups[g] = [f for f in groups[g] if f in names]
+    known = {f for fs in groups.values() for f in fs}
+    for f in feature_names:
         if f in known:
             continue
-
         if f.startswith("FLAG_DOCUMENT"):
-            FEATURE_GROUPS["Documents"].append(f)
-
+            groups["Documents"].append(f)
         elif f.startswith("AMT_REQ_CREDIT_BUREAU") or f.startswith("EXT_SOURCE"):
-            FEATURE_GROUPS["Credit Bureau"].append(f)
-
+            groups["Credit Bureau"].append(f)
         elif f.startswith("FLAG_"):
-            FEATURE_GROUPS["Socio-Professional"].append(f)
-
+            groups["Socio-Professional"].append(f)
         else:
-            FEATURE_GROUPS.setdefault("Other", []).append(f)
+            groups["Other"].append(f)
+    return {g: fs for g, fs in groups.items() if fs}
 
 
-# --- 7. AGENT 1 HELPERS ---
-def load_real_tx(kind):
+# --------------------------------------------------------------------------
+# 4. SESSION STATE (widget defaults)
+# --------------------------------------------------------------------------
+for f in CC_FEATURES:
+    st.session_state.setdefault(f"rnn_{f}", 0.0)
 
-    if kind == 'normal':
-        idx = cc_y_test[cc_y_test == 0].index[0]
-        row = cc_X_test.loc[idx].values
-        label = "NORMAL (real)"
+if HC_FEATURES:
+    means = getattr(models.get("scaler"), "mean_", None)
+    for i, f in enumerate(HC_FEATURES):
+        default = float(means[i]) if means is not None and len(means) == len(HC_FEATURES) else 0.0
+        st.session_state.setdefault(f"rf_{f}", default)
 
-    else:
-        idx = cc_y_test[cc_y_test == 1].index[0]
-        row = cc_X_test.loc[idx].values
-        label = "FRAUD (real)"
+st.session_state.setdefault("tx_label", None)
+st.session_state.setdefault("rf_label", None)
+st.session_state.setdefault("result", None)
 
-    for i, f in enumerate(CC_FEATURE_NAMES):
+
+# --------------------------------------------------------------------------
+# 5. LOAD-EXAMPLE CALLBACKS (run before the widgets are redrawn)
+# --------------------------------------------------------------------------
+def load_transaction(pos, label):
+    row = data["cc_X"].values[pos]
+    for i, f in enumerate(CC_FEATURES):
         st.session_state[f"rnn_{f}"] = float(row[i])
-
-    st.session_state['tx_label'] = label
-    st.rerun()
+    st.session_state["tx_label"] = label
 
 
-def set_rnn_transaction(kind='normal', randomize=False):
+def load_applicant(pos, label):
+    scaled_row = data["hc_X"][pos].reshape(1, -1)
+    raw_row = models["scaler"].inverse_transform(scaled_row)[0]     # back to real units
+    for f, v in zip(HC_FEATURES, raw_row):
+        st.session_state[f"rf_{f}"] = float(v)
+    st.session_state["rf_label"] = label
 
-    if randomize:
-        if kind == 'normal':
-            vals = np.random.normal(
-                cc_stats['normal_mean'],
-                cc_stats['normal_std']
-            )
-            label = "RANDOM NORMAL"
 
-        else:
-            vals = np.random.normal(
-                cc_stats['fraud_mean'],
-                cc_stats['fraud_std']
-            )
-            label = "RANDOM FRAUD"
+def cb_tx_normal():
+    load_transaction(example_positions()["cc_normal"], "NORMAL transaction (real test row)")
 
+
+def cb_tx_fraud():
+    load_transaction(example_positions()["cc_fraud"], "FRAUD transaction (real test row, highest score)")
+
+
+def cb_tx_random():
+    pos = int(np.random.randint(len(data["cc_X"])))
+    kind = "FRAUD" if int(data["cc_y"].values[pos]) == 1 else "NORMAL"
+    load_transaction(pos, f"RANDOM real test transaction (true label: {kind})")
+
+
+def cb_rf_safe():
+    load_applicant(example_positions()["hc_safe"], "SAFEST applicant (real test row)")
+
+
+def cb_rf_risky():
+    load_applicant(example_positions()["hc_risky"], "RISKIEST applicant (real test row)")
+
+
+def cb_rf_random():
+    pos = int(np.random.randint(len(data["hc_X"])))
+    kind = "DEFAULT" if int(data["hc_y"].values[pos]) == 1 else "REPAID"
+    load_applicant(pos, f"RANDOM real test applicant (true outcome: {kind})")
+
+
+# --------------------------------------------------------------------------
+# 6. AGENTS
+# --------------------------------------------------------------------------
+def run_agent1():
+    x = np.array([st.session_state[f"rnn_{f}"] for f in CC_FEATURES], dtype=np.float32)
+    return float(models["rnn"].predict(x.reshape(1, 1, -1), verbose=0)[0][0])
+
+
+def run_agent2():
+    row = {f: float(st.session_state[f"rf_{f}"]) for f in HC_FEATURES}
+    raw = pd.DataFrame([row], columns=HC_FEATURES)
+    scaled = models["scaler"].transform(raw)
+    return float(models["rf"].predict_proba(scaled)[0][1]), scaled[0]
+
+
+def agent3_rules(prob_fraud, prob_default):
+    """Fraud is checked first. Returns (decision, code, reason)."""
+    if prob_fraud > FRAUD_THRESHOLD:
+        return "REJECTED", "fraud", "High fraud risk in transactions"
+    if prob_default > RF_THRESHOLD:
+        return "REJECTED", "default", "High default risk based on profile"
+    return "APPROVED", "ok", "Low fraud risk and low default risk"
+
+
+def factor_sentence(name, v):
+    """Plain-language meaning of one standardized feature (v = std vs average)."""
+    if name.startswith("EXT_SOURCE"):
+        label = name.replace("EXT_SOURCE_", "external credit score ")
+        if v > 0.5:
+            return f"{label} is higher than average (favorable)"
+        if v < -0.5:
+            return f"{label} is lower than average (unfavorable)"
+        return f"{label} is close to average"
+    if name == "DAYS_EMPLOYED":      # negative days: more negative = employed for longer
+        if v < -0.5:
+            return "employment length is longer than average (favorable)"
+        if v > 0.5:
+            return "employment length is shorter than average (unfavorable)"
+        return "employment length is close to average"
+    if v > 0.5:
+        return f"{name} is higher than average"
+    if v < -0.5:
+        return f"{name} is lower than average"
+    return f"{name} is close to average"
+
+
+def top_factors(scaled_row):
+    """The 3 most important features of the Random Forest, in plain words."""
+    idx = np.argsort(models["rf"].feature_importances_)[-3:][::-1]
+    return [factor_sentence(HC_FEATURES[i], float(scaled_row[i])) for i in idx]
+
+
+def facts_text(code, fraud_pct, default_pct, factors):
+    """Exact facts, written by Python (never by the LLM)."""
+    F, R = FRAUD_THRESHOLD * 100, RF_THRESHOLD * 100
+    fac = "; ".join(factors)
+    if code == "fraud":
+        return (f"Fraud risk is {fraud_pct}, above the {F:.0f}% limit; "
+                f"default risk is {default_pct}. Profile factors: {fac}.")
+    if code == "default":
+        return (f"Default risk is {default_pct}, above the {R:.0f}% limit; "
+                f"fraud risk is {fraud_pct}. Profile factors: {fac}.")
+    return (f"Fraud risk is {fraud_pct} (limit {F:.0f}%) and default risk is {default_pct} "
+            f"(limit {R:.0f}%). Profile factors: {fac}.")
+
+
+def template_text(code, fraud_pct, default_pct, factors):
+    """Safe fallback justification, built only from real facts."""
+    F, R = FRAUD_THRESHOLD * 100, RF_THRESHOLD * 100
+    fac = "; ".join(factors)
+    if code == "fraud":
+        return (f"The application is rejected: the fraud risk of {fraud_pct} is above the "
+                f"{F:.0f}% limit. The default risk is {default_pct}. Profile factors: {fac}.")
+    if code == "default":
+        return (f"The application is rejected: the default risk of {default_pct} is above the "
+                f"{R:.0f}% limit. The fraud risk is low ({fraud_pct}). Profile factors: {fac}.")
+    return (f"The application is approved: the fraud risk ({fraud_pct}) and the default risk "
+            f"({default_pct}) are below the limits. Profile factors: {fac}.")
+
+
+def clean_llm_text(text):
+    lines = [l.strip() for l in text.strip().split("\n") if l.strip()]
+    if lines and (lines[0].lower().startswith("here") or lines[0].endswith(":")):
+        lines = lines[1:]
+    return " ".join(lines).strip().strip('"')
+
+
+def sentence_is_valid(sentence, decision, code):
+    """Same checks as 06_coordinator: the LLM may only announce the decision."""
+    low = sentence.lower()
+    ok = 20 <= len(sentence) <= 250
+    ok = ok and not any(ch.isdigit() for ch in sentence)
+    ok = ok and not any(p in low for p in BAD_PHRASES)
+    if decision == "APPROVED":
+        ok = ok and "approv" in low and "reject" not in low and "declin" not in low
     else:
-        if kind == 'normal':
-            idx = cc_y_test[cc_y_test == 0].index[0]
-            label = "NORMAL (real)"
-
-        else:
-            idx = cc_y_test[cc_y_test == 1].index[0]
-            label = "FRAUD (real)"
-
-        vals = cc_X_test.loc[idx].values
-
-    for i, f in enumerate(CC_FEATURE_NAMES):
-        st.session_state[f"rnn_{f}"] = float(vals[i])
-
-    st.session_state['tx_label'] = label
+        ok = (ok and "reject" in low and "is approved" not in low
+              and "been approved" not in low and "be approved" not in low)
+        if code == "default":
+            ok = ok and "fraud" not in low
+        if code == "fraud":
+            ok = ok and "default" not in low
+    return ok
 
 
-def random_rnn(kind='mix'):
-    set_rnn_transaction(kind=kind, randomize=True)
-    st.rerun()
+def ask_llm(decision, reason):
+    verb = "approved" if decision == "APPROVED" else "rejected"
+    prompt = (f"Write ONE short, professional sentence announcing that a loan application is {verb}.\n"
+              f"The reason is: {reason.lower()}.\n"
+              "Do not use any digits or numbers. Do not mention any other fact.\n"
+              "Output only the sentence.")
+    r = requests.post(f"{OLLAMA_URL}/api/generate",
+                      json={"model": OLLAMA_MODEL, "prompt": prompt, "stream": False,
+                            "options": {"temperature": 0.4, "num_predict": 60}},
+                      timeout=120)
+    r.raise_for_status()
+    return clean_llm_text(r.json()["response"])
 
 
-def build_rnn_input():
-    vals = [
-        st.session_state.get(f"rnn_{f}", 0.0)
-        for f in CC_FEATURE_NAMES
-    ]
-
-    return np.array(vals, dtype=np.float32).reshape(1, 1, 30)
-
-
-# --- 8. AGENT 2 HELPERS ---
-def set_rf(feature, value):
-    st.session_state[f"rf_{feature}"] = float(value)
-
-
-def initialize_all_rf_features():
-    """
-    Initialize all Home Credit features using the fitted scaler's
-    training means. This prevents unspecified features from remaining
-    artificially initialized to zero.
-    """
-
-    feature_names = models['feature_names']
-    scaler = models.get('scaler')
-
-    means = getattr(scaler, "mean_", None)
-
-    if means is None or len(means) != len(feature_names):
-        raise RuntimeError(
-            "The Home Credit scaler does not contain matching training means. "
-            "Check hc_scaler.pkl and hc_feature_names.pkl."
-        )
-
-    for feature, value in zip(feature_names, means):
-        st.session_state[f"rf_{feature}"] = float(value)
+def justify(decision, code, reason, fraud_pct, default_pct, factors, use_llm=True):
+    """LLM writes ONE sentence, Python adds the facts. Template if anything fails."""
+    if use_llm:
+        try:
+            sentence = ask_llm(decision, reason)
+            if sentence_is_valid(sentence, decision, code):
+                return (f"{sentence} {facts_text(code, fraud_pct, default_pct, factors)}",
+                        "LLM sentence + exact facts")
+        except Exception:
+            pass
+    return template_text(code, fraud_pct, default_pct, factors), "template (fallback)"
 
 
-# SAFE APPLICANT
-
-def load_safe_applicant():
-
-    feature_names = models['feature_names']
-    scaler = models['scaler']
-    rf_model = models['rf']
-
-    means = scaler.mean_
-
-    best_row = None
-    best_risk = float("inf")
-
-    # Try 1,000 different financially strong applicant profiles
-    for _ in range(1000):
-
-        candidate = {
-            f: float(v)
-            for f, v in zip(feature_names, means)
-        }
-
-        # Financial profile
-        income = np.random.uniform(250_000, 500_000)
-        credit = np.random.uniform(50_000, 200_000)
-        annuity = np.random.uniform(4_000, 12_000)
-
-        safe_values = {
-            "AMT_INCOME_TOTAL": income,
-            "AMT_CREDIT": credit,
-            "AMT_ANNUITY": annuity,
-            "AMT_GOODS_PRICE": credit * np.random.uniform(0.90, 1.0),
-            "CNT_CHILDREN": np.random.randint(0, 2),
-            "CNT_FAM_MEMBERS": np.random.randint(1, 3),
-            "DAYS_BIRTH": np.random.uniform(-25_000, -15_000),
-            "DAYS_EMPLOYED": np.random.uniform(-10_000, -2_000),
-            "REGION_RATING_CLIENT": 1,
-            "REGION_RATING_CLIENT_W_CITY": 1,
-        }
-
-        for feature, value in safe_values.items():
-            if feature in candidate:
-                candidate[feature] = float(value)
-
-        # Strong external-source scores
-        for f in feature_names:
-            if f.startswith("EXT_SOURCE"):
-                candidate[f] = np.random.uniform(0.75, 0.99)
-
-            elif f.startswith("AMT_REQ_CREDIT_BUREAU"):
-                candidate[f] = 0
-
-        # Evaluate this candidate using the real model
-        candidate_df = pd.DataFrame(
-            [candidate],
-            columns=feature_names
-        )
-
-        scaled_candidate = scaler.transform(candidate_df)
-
-        risk = float(
-            rf_model.predict_proba(scaled_candidate)[0][1]
-        )
-
-        # Keep the candidate with the lowest predicted risk
-        if risk < best_risk:
-            best_risk = risk
-            best_row = candidate.copy()
-
-        # Stop early if the profile is below the 25% threshold
-        if best_risk <= 0.25:
-            break
-
-    # Load the best profile into Streamlit
-    for feature, value in best_row.items():
-        st.session_state[f"rf_{feature}"] = float(value)
-
-    if best_risk <= 0.25:
-        st.session_state['rf_label'] = "SAFE Applicant"
-    else:
-        st.session_state['rf_label'] = (
-            f"Best Available Applicant ({best_risk * 100:.2f}% risk)"
-        )
-
-# RISKY APPLICANT
-def load_risky_applicant():
-
-    initialize_all_rf_features()
-
-    set_rf("AMT_INCOME_TOTAL", 30_000)
-    set_rf("AMT_CREDIT", 1_200_000)
-    set_rf("AMT_ANNUITY", 80_000)
-    set_rf("AMT_GOODS_PRICE", 1_000_000)
-
-    set_rf("CNT_CHILDREN", 4)
-    set_rf("CNT_FAM_MEMBERS", 6)
-
-    set_rf("CODE_GENDER", 1)
-    set_rf("FLAG_OWN_CAR", 0)
-    set_rf("FLAG_OWN_REALTY", 0)
-
-    set_rf("DAYS_BIRTH", -8_000)
-    set_rf("DAYS_EMPLOYED", -100)
-
-    for f in models['feature_names']:
-
-        if f.startswith("EXT_SOURCE"):
-            st.session_state[f"rf_{f}"] = 0.10
-
-        if f.startswith("FLAG_DOCUMENT"):
-            st.session_state[f"rf_{f}"] = 0
-
-    st.session_state['rf_label'] = "RISKY Applicant"
+@st.cache_data(ttl=10)
+def ollama_running():
+    try:
+        requests.get(OLLAMA_URL, timeout=1.5)
+        return True
+    except Exception:
+        return False
 
 
-# RANDOM APPLICANT
-def load_random_applicant():
+# --------------------------------------------------------------------------
+# 7. HEADER
+# --------------------------------------------------------------------------
+st.markdown('<p class="main-title">AURA CREDIT ENGINE</p>', unsafe_allow_html=True)
+st.markdown('<p class="sub-title">Multi-agent credit scoring: fraud (RNN) + default risk '
+            '(Random Forest) + decision (rules and local LLM)</p>', unsafe_allow_html=True)
 
-    flavor = np.random.choice(
-        ['safe', 'risky', 'average'],
-        p=[0.4, 0.4, 0.2]
+with st.expander("How this demo works (read before presenting)"):
+    st.markdown(
+        "- **Agent 1 (RNN / LSTM)** reads one transaction (30 numbers) and gives a **fraud score**.\n"
+        "- **Agent 2 (Random Forest)** reads one applicant profile (79 numbers) and gives a **default score**.\n"
+        "- **Agent 3 (rules + local LLM)** takes the decision. **Rules decide**: fraud above 50% is "
+        "rejected first, then default above 50% is rejected, otherwise approved. The local LLM only "
+        "writes **one opening sentence**; every number comes from Python. If the LLM fails or its "
+        "sentence does not pass the checks, a template text is used and the decision stays the same.\n"
+        "- The two datasets describe **different people** and share no customer ID, so the customer "
+        "in this demo is a **simulation** (one transaction + one profile chosen by you).\n"
+        "- The Random Forest score is **not a real probability** (class_weight='balanced'): "
+        "a high score means *risky compared with others*."
     )
 
-    if flavor == 'safe':
-
-        income = np.random.uniform(200_000, 400_000)
-        credit = np.random.uniform(50_000, 150_000)
-        annuity = np.random.uniform(2_000, 8_000)
-        children = np.random.randint(0, 2)
-
-        gender = np.random.choice([0, 1], p=[0.6, 0.4])
-        car = np.random.choice([0, 1], p=[0.2, 0.8])
-        realty = np.random.choice([0, 1], p=[0.2, 0.8])
-
-        dob = np.random.uniform(-25_000, -15_000)
-        emp = np.random.uniform(-10_000, -3_000)
-
-        ext = np.random.uniform(0.6, 0.95)
-        doc = np.random.choice([0, 1], p=[0.1, 0.9])
-        req = np.random.randint(0, 2)
-        rating = np.random.randint(1, 3)
-
-    elif flavor == 'risky':
-
-        income = np.random.uniform(20_000, 60_000)
-        credit = np.random.uniform(800_000, 1_500_000)
-        annuity = np.random.uniform(50_000, 100_000)
-        children = np.random.randint(2, 6)
-
-        gender = np.random.choice([0, 1], p=[0.4, 0.6])
-        car = np.random.choice([0, 1], p=[0.8, 0.2])
-        realty = np.random.choice([0, 1], p=[0.8, 0.2])
-
-        dob = np.random.uniform(-10_000, -7_000)
-        emp = np.random.uniform(-500, 0)
-
-        ext = np.random.uniform(0.02, 0.2)
-        doc = np.random.choice([0, 1], p=[0.8, 0.2])
-        req = np.random.randint(3, 8)
-        rating = np.random.randint(2, 4)
-
-    else:
-
-        income = np.random.uniform(80_000, 180_000)
-        credit = np.random.uniform(200_000, 600_000)
-        annuity = np.random.uniform(15_000, 35_000)
-        children = np.random.randint(0, 3)
-
-        gender = np.random.choice([0, 1])
-        car = np.random.choice([0, 1])
-        realty = np.random.choice([0, 1])
-
-        dob = np.random.uniform(-20_000, -10_000)
-        emp = np.random.uniform(-5_000, -500)
-
-        ext = np.random.uniform(0.3, 0.7)
-        doc = np.random.choice([0, 1])
-        req = np.random.randint(0, 4)
-        rating = np.random.randint(1, 4)
-
-    # Initialize ALL features first
-    initialize_all_rf_features()
-
-    # Override selected features with generated applicant values
-    set_rf("AMT_INCOME_TOTAL", income)
-    set_rf("AMT_CREDIT", credit)
-    set_rf("AMT_ANNUITY", annuity)
-
-    set_rf(
-        "AMT_GOODS_PRICE",
-        credit * np.random.uniform(0.85, 1.05)
-    )
-
-    set_rf("CNT_CHILDREN", children)
-    set_rf(
-        "CNT_FAM_MEMBERS",
-        children + np.random.randint(1, 3)
-    )
-
-    set_rf("CODE_GENDER", gender)
-    set_rf("FLAG_OWN_CAR", car)
-    set_rf("FLAG_OWN_REALTY", realty)
-
-    set_rf("DAYS_BIRTH", dob)
-    set_rf("DAYS_EMPLOYED", emp)
-    set_rf("REGION_RATING_CLIENT", rating)
-
-    for f in models['feature_names']:
-
-        if f.startswith("EXT_SOURCE"):
-            st.session_state[f"rf_{f}"] = ext + np.random.uniform(-0.05, 0.05)
-
-        if f.startswith("FLAG_DOCUMENT"):
-            st.session_state[f"rf_{f}"] = doc
-
-        if f.startswith("AMT_REQ_CREDIT_BUREAU"):
-            st.session_state[f"rf_{f}"] = req
-
-    st.session_state['rf_label'] = (
-        f"RANDOM Applicant ({flavor.upper()})"
-    )
-
-
-def build_rf_input():
-
-    row = {
-        f: float(st.session_state.get(f"rf_{f}", 0.0))
-        for f in models['feature_names']
-    }
-
-    return pd.DataFrame(
-        [row],
-        columns=models['feature_names']
-    )
-
-
-# --- 9. INIT ---
-if not st.session_state['rnn_initialized'] and 'rnn' in models:
-
-    for f in CC_FEATURE_NAMES:
-        st.session_state.setdefault(f"rnn_{f}", 0.0)
-
-    st.session_state['rnn_initialized'] = True
-
-
-if not st.session_state['rf_initialized'] and 'feature_names' in models:
-
-    scaler_means = getattr(models.get('scaler'), "mean_", None)
-
-    for i, f in enumerate(models['feature_names']):
-
-        default_value = (
-            float(scaler_means[i])
-            if scaler_means is not None
-            else 0.0
-        )
-
-        st.session_state.setdefault(
-            f"rf_{f}",
-            default_value
-        )
-
-    st.session_state['rf_initialized'] = True
-
-
-# --- 10. HEADER ---
-st.markdown(
-    '<p class="main-title">AURA CREDIT ENGINE</p>',
-    unsafe_allow_html=True
-)
-
-st.markdown(
-    '<p class="sub-title">Multi-Agent Decentralized Solvency & Fraud Analysis Pipeline</p>',
-    unsafe_allow_html=True
-)
-
-tab1, tab2 = st.tabs([
-    "AGENT 1: TRANSACTION FRAUD (RNN)",
-    "AGENTS 2 & 3: LOAN SOLVENCY (RF + LR)"
+tab1, tab2, tab3 = st.tabs([
+    "1 | AGENT 1: TRANSACTION FRAUD (RNN)",
+    "2 | AGENT 2: LOAN APPLICANT (RANDOM FOREST)",
+    "3 | AGENT 3: FINAL DECISION (RULES + LLM)",
 ])
 
-
-# ==========================================
-# TAB 1: AGENT 1 (RNN)
-# ==========================================
+# ==========================================================================
+# TAB 1: AGENT 1
+# ==========================================================================
 with tab1:
+    st.markdown("### Transaction fraud check: Agent 1 (LSTM)")
+    st.markdown(f"The RNN reads **{len(CC_FEATURES)} features** of one card transaction. "
+                "V1 to V28 are PCA components (not interpretable); amount and time are standardized. "
+                "You can edit every value.")
 
-    st.markdown(
-        "### Transaction Fraud Check — Agent 1 (LSTM)"
-    )
+    if "rnn" not in models:
+        st.error("Agent 1 is missing: run `03_agent1_rnn.ipynb` to create `models/agent1_rnn.h5`.")
+    elif "cc_X" not in data:
+        st.warning("`data/clean/cc_data.pkl` not found: run `02_clean.ipynb`. "
+                   "You can still type the values by hand.")
+    else:
+        c1, c2, c3 = st.columns(3)
+        c1.button("Load NORMAL transaction", on_click=cb_tx_normal, key="b_tx_n")
+        c2.button("Load obvious FRAUD", on_click=cb_tx_fraud, key="b_tx_f")
+        c3.button("Random real transaction", on_click=cb_tx_random, key="b_tx_r")
 
-    st.markdown(
-        f"**Dataset:** Credit Card Fraud — "
-        f"{cc_stats['normal_count']:,} normal / "
-        f"{cc_stats['fraud_count']:,} fraud in training."
-    )
+    if st.session_state["tx_label"]:
+        st.markdown(f"**Currently loaded:** `{st.session_state['tx_label']}`")
 
-    st.markdown(
-        "The RNN uses **30 features** from the Credit Card dataset. "
-        "You can edit any of them below."
-    )
-
-    with st.container(key="agent1_load_buttons"):
-
-        btn_cols = st.columns(3)
-
-        with btn_cols[0]:
-
-            if st.button(
-                "Load REAL Normal",
-                key="btn_safe",
-                use_container_width=True
-            ):
-                load_real_tx('normal')
-
-        with btn_cols[1]:
-
-            if st.button(
-                "Load REAL Fraud",
-                key="btn_fraud_load",
-                use_container_width=True
-            ):
-                load_real_tx('fraud')
-
-        with btn_cols[2]:
-
-            if st.button(
-                "Random FRAUD",
-                key="btn_random_fraud",
-                use_container_width=True
-            ):
-                random_rnn('fraud')
-
-    if st.session_state.get('tx_label'):
-
-        st.markdown(
-            f"**Currently loaded:** `{st.session_state['tx_label']}`"
-        )
-
-    st.markdown(
-        "#### Agent 1 Input Features (30 editable boxes)"
-    )
-
-    rnn_cols = st.columns(5)
-
-    for i, f in enumerate(CC_FEATURE_NAMES):
-
-        with rnn_cols[i % 5]:
-
-            st.number_input(
-                label=f,
-                step=0.01,
-                format="%.4f",
-                key=f"rnn_{f}"
-            )
+    cols = st.columns(5)
+    for i, f in enumerate(CC_FEATURES):
+        with cols[i % 5]:
+            st.number_input(f, step=0.01, format="%.4f", key=f"rnn_{f}")
 
     st.write("---")
+    if st.button("RUN FRAUD DIAGNOSTICS", key="run_a1", disabled="rnn" not in models):
+        with st.spinner("Agent 1 analyzing the transaction..."):
+            p1 = run_agent1()
+        st.markdown('<div class="glass-card">', unsafe_allow_html=True)
+        st.markdown("#### Agent 1: fraud score")
+        m1, m2 = st.columns(2)
+        m1.metric("Fraud probability", f"{p1 * 100:.2f}%")
+        m2.metric("Limit", f"{FRAUD_THRESHOLD * 100:.0f}%")
+        st.progress(min(max(p1, 0.0), 1.0))
+        if p1 > FRAUD_THRESHOLD:
+            st.error("FRAUD ALERT: block this transaction.")
+        else:
+            st.success("SAFE: transaction looks legitimate.")
+        st.markdown('</div>', unsafe_allow_html=True)
 
-    if st.button(
-        "RUN FRAUD DIAGNOSTICS",
-        key="btn_fraud",
-        type="primary"
-    ):
-
-        if 'rnn' in models:
-
-            with st.spinner(
-                "Agent 1 analyzing the 30 features..."
-            ):
-
-                input_rnn = build_rnn_input()
-
-                proba = float(
-                    models['rnn'].predict(
-                        input_rnn,
-                        verbose=0
-                    )[0][0]
-                )
-
-                st.session_state['rnn_fraud_proba'] = proba
-
-            st.markdown(
-                '<div class="glass-card">',
-                unsafe_allow_html=True
-            )
-
-            st.markdown(
-                "#### Agent 1 — LSTM Fraud Score"
-            )
-
-            st.markdown(
-                f"**Fraud probability:** `{proba*100:.4f}%`"
-            )
-
-            st.markdown(
-                f"**Raw score:** `{proba:.6f}`"
-            )
-
-            if proba > 0.5:
-
-                st.error(
-                    "FRAUD ALERT — BLOCK TRANSACTION"
-                )
-
-            else:
-
-                conf = (1 - proba) * 100
-
-                st.success(
-                    "SAFE — APPROVE TRANSACTION"
-                )
-
-                st.info(
-                    f"The model is **{conf:.4f}% confident** "
-                    "that this transaction is legitimate."
-                )
-
-            st.markdown(
-                '</div>',
-                unsafe_allow_html=True
-            )
-
-
-# ==========================================
-# TAB 2: AGENT 2 & 3
-# ==========================================
+# ==========================================================================
+# TAB 2: AGENT 2
+# ==========================================================================
 with tab2:
+    st.markdown("### Loan applicant profile: Agent 2 (Random Forest)")
 
-    if 'feature_names' not in models:
+    missing = [n for n, k in [("`agent2_rf.pkl`", "rf"), ("`hc_scaler.pkl`", "scaler"),
+                              ("the feature names", "feature_names")] if k not in models]
+    if missing:
+        st.error("Missing: " + ", ".join(missing) + ". Run `02_clean.ipynb` and `04_agent2_rf.ipynb`.")
+    else:
+        st.markdown(f"The Random Forest reads **{len(HC_FEATURES)} features** of one applicant. "
+                    "Values are in real units (income, days...). Text categories (education, "
+                    "occupation...) are stored as label-encoded numbers.")
+        st.info(f"Decision threshold: **{RF_THRESHOLD * 100:.0f}%** (chosen in the threshold analysis: "
+                "precision 0.17, recall 0.61). A default score above it is considered risky. "
+                "The score is not a calibrated probability.")
 
-        st.error(
-            "Run `05_agent3_lr.ipynb` first to generate "
-            "`hc_feature_names.pkl`."
-        )
-
-        st.stop()
-
-    st.markdown(
-        "### Loan Solvency Assessment"
-    )
-
-    st.markdown(
-        "The Random Forest uses **79 features**. "
-        "Use one of the 3 buttons below."
-    )
-
-    st.info(
-        "Note on decision threshold: Because of the 92/8 class "
-        "imbalance in Home Credit, the Random Forest was trained "
-        "with `class_weight='balanced'`. Its effective decision "
-        "threshold is **25%** (not 50%). Any default risk "
-        "**> 25%** is considered RISKY."
-    )
-
-    # IMPORTANT:
-    # Callbacks execute BEFORE Streamlit recreates the widgets.
-    # They modify Agent 2 keys only, never Agent 1 keys.
-
-    with st.container(key="agent2_load_buttons"):
-
-        b1, b2, b3 = st.columns(3)
-
-        with b1:
-
-            st.button(
-                "Load SAFE Applicant",
-                key="btn_rf_safe",
-                use_container_width=True,
-                on_click=load_safe_applicant
-            )
-
-        with b2:
-
-            st.button(
-                "Load RISKY Applicant",
-                key="btn_rf_risky",
-                use_container_width=True,
-                on_click=load_risky_applicant
-            )
-
-        with b3:
-
-            st.button(
-                "Random Applicant",
-                key="btn_rf_random",
-                use_container_width=True,
-                on_click=load_random_applicant
-            )
-
-    if st.session_state.get('rf_label'):
-
-        st.markdown(
-            f"**Currently loaded:** `{st.session_state['rf_label']}`"
-        )
-
-    # AGENT 2 INPUT TABS
-    group_names = [
-        g for g in FEATURE_GROUPS
-        if FEATURE_GROUPS[g]
-    ]
-
-    input_tabs = st.tabs(group_names)
-
-    for g_name, g_tab in zip(group_names, input_tabs):
-
-        with g_tab:
-
-            cols = st.columns(3)
-
-            for i, f in enumerate(FEATURE_GROUPS[g_name]):
-
-                with cols[i % 3]:
-
-                    st.number_input(
-                        label=f,
-                        step=0.01,
-                        format="%.4f",
-                        key=f"rf_{f}"
-                    )
-
-    st.write("---")
-
-    if st.button(
-        "RUN SOLVENCY ASSESSMENT",
-        key="btn_loan",
-        type="primary"
-    ):
-
-        with st.spinner(
-            "Processing multi-agent pipeline..."
-        ):
-
-            raw_df = build_rf_input()
-
-            scaled_df = models['scaler'].transform(raw_df)
-
-            rf_proba = float(
-                models['rf'].predict_proba(scaled_df)[0][1]
-            )
-
-            rnn_score = st.session_state['rnn_fraud_proba']
-
-            # AGENT 3: LOGISTIC REGRESSION
-            if 'lr' in models:
-
-                lr_input = np.array([
-                    [rnn_score, rf_proba]
-                ])
-
-                final_proba = float(
-                    models['lr'].predict_proba(lr_input)[0][1]
-                )
-
-                reason = (
-                    "Decision fused by Agent 3 "
-                    "(Logistic Regression)."
-                )
-
-            else:
-
-                final_proba = (
-                    0.99
-                    if (rnn_score > 0.5 or rf_proba > 0.25)
-                    else 0.1
-                )
-
-                reason = (
-                    "Agent 3 missing — fallback rule applied "
-                    "(threshold 25%)."
-                )
-
-        st.markdown(
-            '<div class="glass-card">',
-            unsafe_allow_html=True
-        )
-
-        st.markdown(
-            "### Final Loan Decision Pipeline"
-        )
-
-        # 1. AGENT 1
-        st.markdown(
-            f"**1. Fraud Risk (Agent 1 — LSTM):** "
-            f"`{rnn_score*100:.4f}%`"
-        )
-
-        if rnn_score > 0.5:
-
-            st.error(
-                "Flagged for fraud."
-            )
-
+        if "hc_X" in data:
+            b1, b2, b3 = st.columns(3)
+            b1.button("Load SAFEST applicant", on_click=cb_rf_safe, key="b_rf_s")
+            b2.button("Load RISKIEST applicant", on_click=cb_rf_risky, key="b_rf_r")
+            b3.button("Random real applicant", on_click=cb_rf_random, key="b_rf_x")
         else:
+            st.warning("`data/clean/hc_data.pkl` not found: run `02_clean.ipynb` to enable the example buttons.")
 
-            st.success(
-                "Passed fraud check."
-            )
+        if st.session_state["rf_label"]:
+            st.markdown(f"**Currently loaded:** `{st.session_state['rf_label']}`")
 
-        # 2. AGENT 2
-        st.markdown(
-            f"**2. Default Risk (Agent 2 — RF):** "
-            f"`{rf_proba*100:.4f}%` "
-            "*(threshold: 25%)*"
-        )
-
-        if rf_proba > 0.25:
-
-            st.error(
-                "High default risk (above 25% threshold)."
-            )
-
-        else:
-
-            st.success(
-                "Acceptable profile (below 25% threshold)."
-            )
+        groups = build_feature_groups(HC_FEATURES)
+        gtabs = st.tabs(list(groups.keys()))
+        for (g_name, feats), g_tab in zip(groups.items(), gtabs):
+            with g_tab:
+                gcols = st.columns(3)
+                for i, f in enumerate(feats):
+                    with gcols[i % 3]:
+                        st.number_input(f, step=0.01, format="%.4f", key=f"rf_{f}")
 
         st.write("---")
+        if st.button("RUN SOLVENCY ASSESSMENT", key="run_a2"):
+            with st.spinner("Agent 2 analyzing the profile..."):
+                p2, _ = run_agent2()
+            st.markdown('<div class="glass-card">', unsafe_allow_html=True)
+            st.markdown("#### Agent 2: default score")
+            m1, m2 = st.columns(2)
+            m1.metric("Default score", f"{p2 * 100:.2f}%")
+            m2.metric("Limit", f"{RF_THRESHOLD * 100:.0f}%")
+            st.progress(min(max(p2, 0.0), 1.0))
+            if p2 > RF_THRESHOLD:
+                st.error("High default risk (above the limit).")
+            else:
+                st.success("Acceptable profile (below the limit).")
+            st.caption("High score = risky compared with other applicants, not an exact chance of default.")
+            st.markdown('</div>', unsafe_allow_html=True)
 
-        # 3. AGENT 3
-        st.markdown(
-            f"**3. Final Decision (Agent 3 — LR):** "
-            f"`{final_proba*100:.4f}%`"
-        )
+# ==========================================================================
+# TAB 3: AGENT 3
+# ==========================================================================
+with tab3:
+    st.markdown("### Final decision: Agent 3 (rules + local LLM)")
+    st.markdown("Agent 3 runs **both agents on the values currently typed in tabs 1 and 2**, "
+                "then applies the rules and writes the justification.")
 
-        if final_proba > 0.5:
+    ready = all(k in models for k in ["rnn", "rf", "scaler", "feature_names"])
+    if not ready:
+        st.error("Some agents are missing (see the sidebar). Run the notebooks 02, 03 and 04 first.")
+    else:
+        if all(st.session_state[f"rnn_{f}"] == 0.0 for f in CC_FEATURES):
+            st.warning("No transaction loaded: Agent 1 would score an all-zero transaction. "
+                       "Load or type one in tab 1.")
+        st.caption(f"Transaction: {st.session_state['tx_label'] or 'typed by hand'}   |   "
+                   f"Applicant: {st.session_state['rf_label'] or 'typed by hand / average profile'}")
 
-            st.markdown(
-                "<h2 style='color:#FF4B4B;'>LOAN REJECTED</h2>",
-                unsafe_allow_html=True
-            )
+        use_llm = st.checkbox("Use the local LLM for the opening sentence "
+                              "(otherwise the template text is used)", value=True)
 
-        else:
+        if st.button("RUN FULL PIPELINE", key="run_all"):
+            with st.spinner("Agent 1 and Agent 2 are scoring..."):
+                p_fraud = run_agent1()
+                p_default, scaled_row = run_agent2()
+            decision, code, reason = agent3_rules(p_fraud, p_default)
+            fraud_pct, default_pct = f"{p_fraud * 100:.2f}%", f"{p_default * 100:.2f}%"
+            factors = top_factors(scaled_row)
+            with st.spinner("Agent 3 is writing the justification..."):
+                text, source = justify(decision, code, reason, fraud_pct, default_pct,
+                                       factors, use_llm=use_llm and ollama_running())
+            st.session_state["result"] = {
+                "fraud": p_fraud, "default": p_default, "decision": decision, "code": code,
+                "reason": reason, "text": text, "source": source, "factors": factors}
 
-            st.markdown(
-                "<h2 style='color:#00F0FF;'>LOAN APPROVED</h2>",
-                unsafe_allow_html=True
-            )
+        res = st.session_state["result"]
+        if res:
+            st.markdown('<div class="glass-card">', unsafe_allow_html=True)
+            st.markdown("#### Pipeline result")
+            a, b = st.columns(2)
+            with a:
+                st.metric("Agent 1: fraud risk", f"{res['fraud'] * 100:.2f}%",
+                          help=f"Limit {FRAUD_THRESHOLD * 100:.0f}%")
+                st.progress(min(max(res["fraud"], 0.0), 1.0))
+                (st.error if res["fraud"] > FRAUD_THRESHOLD else st.success)(
+                    "Flagged for fraud." if res["fraud"] > FRAUD_THRESHOLD else "Passed the fraud check.")
+            with b:
+                st.metric("Agent 2: default risk", f"{res['default'] * 100:.2f}%",
+                          help=f"Limit {RF_THRESHOLD * 100:.0f}%")
+                st.progress(min(max(res["default"], 0.0), 1.0))
+                (st.error if res["default"] > RF_THRESHOLD else st.success)(
+                    "High default risk." if res["default"] > RF_THRESHOLD else "Acceptable profile.")
 
-        st.write(reason)
+            st.write("---")
+            if res["decision"] == "APPROVED":
+                st.markdown('<p class="decision-ok">LOAN APPROVED</p>', unsafe_allow_html=True)
+            else:
+                st.markdown('<p class="decision-bad">LOAN REJECTED</p>', unsafe_allow_html=True)
+            st.markdown(f"**Rule applied:** {res['reason']}")
+            st.markdown("**Justification**")
+            st.write(res["text"])
+            tag = "tag" if res["source"].startswith("LLM") else "tag tag-warn"
+            st.markdown(f'<span class="{tag}">Source: {res["source"]}</span>', unsafe_allow_html=True)
+            st.markdown("**Top 3 profile factors (Random Forest)**")
+            for fct in res["factors"]:
+                st.markdown(f"- {fct}")
+            st.caption("The decision is taken by the rules only; the LLM never changes it.")
+            st.markdown('</div>', unsafe_allow_html=True)
 
-        st.markdown(
-            '</div>',
-            unsafe_allow_html=True
-        )
-
-
-# ==========================================
-# SIDEBAR: SYSTEM STATUS
-# ==========================================
+# --------------------------------------------------------------------------
+# 8. SIDEBAR
+# --------------------------------------------------------------------------
 with st.sidebar:
-
-    st.markdown(
-        "<h2 style='color:#00F0FF;'>SYSTEM STATUS</h2>",
-        unsafe_allow_html=True
-    )
-
+    st.markdown("<h2 style='color:#00F0FF;'>SYSTEM STATUS</h2>", unsafe_allow_html=True)
     st.markdown("---")
 
-    status_items = [
-        ("Agent 1 (LSTM)", "rnn" in models),
-        ("Agent 2 (RF)", "rf" in models),
-        ("Agent 3 (LR)", "lr" in models),
-        ("HC Scaler", "scaler" in models),
-        ("HC Features", "feature_names" in models)
+    llm_up = ollama_running()
+    items = [
+        ("Agent 1 (LSTM)", "rnn" in models, "READY", "MISSING"),
+        ("Agent 2 (Random Forest)", "rf" in models, "READY", "MISSING"),
+        ("Agent 3 (rules)", True, "READY", "MISSING"),
+        ("Local LLM (Ollama)", llm_up, "READY", "OFFLINE: template used"),
+        ("HC scaler", "scaler" in models, "READY", "MISSING"),
+        ("HC feature names", "feature_names" in models, "READY", "MISSING"),
+        ("Test data", "cc_X" in data and "hc_X" in data, "READY", "MISSING"),
     ]
+    for label, ok, yes, no in items:
+        color = "#16A34A" if ok else "#DC2626"
+        st.markdown(f"<p style='margin:0.35rem 0;color:{color};font-weight:600;'>"
+                    f"{label}: {yes if ok else no}</p>", unsafe_allow_html=True)
 
-    for label, available in status_items:
-
-        status_color = (
-            "#16A34A" if available else "#DC2626"
-        )
-
-        status_text = (
-            "READY" if available else "MISSING"
-        )
-
-        st.markdown(
-            f"<p style='margin: 0.35rem 0; "
-            f"color: {status_color}; font-weight: 600;'>"
-            f"{label}: {status_text}</p>",
-            unsafe_allow_html=True
-        )
+    st.markdown("---")
+    st.markdown("**Decision rules**")
+    st.markdown(f"1. Fraud score above {FRAUD_THRESHOLD * 100:.0f}%: REJECTED\n"
+                f"2. Default score above {RF_THRESHOLD * 100:.0f}%: REJECTED\n"
+                "3. Otherwise: APPROVED")
+    st.caption("Fraud is checked first. Only test rows are used for the examples.")
