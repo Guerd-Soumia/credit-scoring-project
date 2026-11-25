@@ -1,3 +1,4 @@
 data/clean/hc_data.pkl filter=lfs diff=lfs merge=lfs -text
 data/home_credit/application_train.csv filter=lfs diff=lfs merge=lfs -text
 data/creditcard.csv filter=lfs diff=lfs merge=lfs -text
+data/clean/hc_data.pkl filter=lfs diff=lfs merge=lfs -text
