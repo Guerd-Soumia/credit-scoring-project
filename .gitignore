@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# Virtual environments and secrets
+.venv/
+.env
+*.env
+.streamlit/secrets.toml
+
+# Jupyter temporary files
+.ipynb_checkpoints/
+*/.ipynb_checkpoints/
+
+# Temporary / editor / OS files
+*.tmp
+*.temp
+*.swp
+*~
+.DS_Store
+Thumbs.db
+
+# Large raw and cleaned datasets are downloaded separately (see README.md).
+# The trained model, scaler and feature names in models/ ARE intentionally tracked.
+data/clean/*.pkl
+data/home_credit/*.csv
+data/*.csv
+
+# Generated reports/artifacts
+runs/
+outputs/
